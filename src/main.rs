@@ -1,4 +1,4 @@
-use neo4j::Neo4jService;
+use neo4j::{Neo4jService, Config};
 use clap::{Parser, Subcommand};
 use std::path::Path;
 
@@ -6,6 +6,10 @@ use std::path::Path;
 #[command(name = "neo4j-tool")]
 #[command(about = "Neo4j数据导入导出工具")]
 struct Cli {
+    /// 配置文件路径
+    #[arg(short, long, default_value = "config.toml")]
+    config: String,
+    
     #[command(subcommand)]
     command: Commands,
 }
@@ -34,13 +38,24 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     
-    // Neo4j连接配置
-    let uri = "10.147.17.54:7687";
-    let user = "neo4j";
-    let password = "password";
+    // 从配置文件加载配置
+    let config = Config::from_file(&cli.config).map_err(|e| {
+        format!("无法加载配置文件 '{}': {}", cli.config, e)
+    })?;
+    
+    // 验证配置
+    config.validate().map_err(|e| {
+        format!("配置验证失败: {}", e)
+    })?;
+    
+    // 使用配置中的Neo4j连接信息
+    let neo4j_config = &config.neo4j;
+    let uri = neo4j_config.get_connection_uri();
+    let user = &neo4j_config.user;
+    let password = &neo4j_config.password;
 
-    let service = Neo4jService::new(uri, user, password).await?;
-    println!("连接成功！");
+    let service = Neo4jService::new(&uri, user, password).await?;
+    println!("连接成功！URI: {}, 用户: {}", uri, user);
 
     match &cli.command {
         Commands::Import { input } => {

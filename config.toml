@@ -1,0 +1,64 @@
+#中英双语注释
+
+[Neo4j]
+# Neo4j 数据库连接配置
+uri = "bolt://10.147.17.54:7687"          # Neo4j 服务器地址和端口（建议添加协议前缀）
+user = "neo4j"                            # 数据库用户名
+password = "password"                     # 数据库密码
+database = "neo4j"                        # 目标数据库名称（Neo4j 4.0+支持多数据库）
+
+[Before_Run]
+# 运行前预处理配置
+verify_toml = true                        # 是否验证TOML文件格式
+clear_db = false                          # 是否在导入前清空数据库
+
+[Run]
+# 程序运行配置
+count = 1                                 # 程序运行次数（重复执行次数）
+Threads = 8                               # 并行处理的最大线程数
+
+[After_Run]
+# 运行后处理配置
+cypher = []                               # 执行完毕后执行的cypher语句
+del_target=true                           # 是否删除标识符
+output_status = true                      # 是否输出最终状态（ok/err）
+
+[Correction]
+# 数据修正配置
+case = []                                 # 对于neo4j不欢迎的字符进行替换或删除,或者直接删除该属性
+sanitize_node_labels = true               # 是否清理节点标签中的特殊字符
+sanitize_property_keys = true             # 是否清理属性键中的特殊字符
+sanitize_relation_types = true            # 是否清理关系类型中的特殊字符
+
+[Ignore]
+# 数据过滤配置：指定要忽略的节点、关系和属性
+types = []                                # 要忽略的节点/关系类型
+propertys = []                            # 要忽略的属性名称
+
+# 扩展的忽略配置
+ignored_node_types = []                   # 要忽略的节点类型
+ignored_relation_types = []               # 要忽略的关系类型
+ignored_node_properties = [               # 要忽略的节点属性
+    "内部ID",
+    "临时标记",
+    "_metadata"
+]
+ignored_relation_properties = [           # 要忽略的关系属性
+    "内部ID", 
+    "临时标记",
+    "_metadata"
+]
+
+# 基于值的过滤
+skip_empty_values = true                  # 跳过空值属性
+filtered_values = ["", "NULL", "null", "N/A", "未知"]  # 要过滤的特定属性值
+
+[APOC]
+# APOC (Awesome Procedures On Cypher) 插件配置
+enabled = true                            # Neo4j 是否安装并启用了 APOC 插件
+
+[Input]
+# 输入路径配置
+path = "data"                             # TOML文件或包含多个TOML文件的目录路径
+recursive_scan = true                     # 是否递归扫描子目录
+

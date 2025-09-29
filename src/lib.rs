@@ -6,6 +6,10 @@ use std::path::Path;
 pub mod adt;
 pub use adt::{DynamicTomlData, NodeEntity, RelationEntity, PropertyValue};
 
+// 导入配置模块
+pub mod config;
+pub use config::{Config, Neo4jConfig};
+
 // 定义一个结构化的Neo4j服务 OOP
 pub struct Neo4jService {
     graph: Graph,
@@ -65,99 +69,18 @@ impl Neo4jService {
         Ok(())
     }
 
-    // 加载文件夹中的所有文件（仅当前目录，不递归）
+    // 加载文件夹中的所有文件
     pub async fn load_directory<P: AsRef<Path>>(&self, dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
-        self.load_directory_internal(dir_path, false, 0).await
-    }
-
-    // 递归加载文件夹中的所有文件（包括子文件夹）
-    pub async fn load_directory_recursive<P: AsRef<Path>>(&self, dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
-        println!("开始递归扫描目录: {:?}", dir_path.as_ref());
-        let result = self.load_directory_internal(dir_path, true, 0).await;
-        println!("递归扫描完成");
-        result
-    }
-
-    // 内部实现：支持递归和非递归的目录加载
-    async fn load_directory_internal<P: AsRef<Path>>(&self, dir_path: P, recursive: bool, depth: usize) -> Result<(), Box<dyn std::error::Error>> {
-        let path = dir_path.as_ref();
+        let entries = fs::read_dir(dir_path)?;
         
-        // 防止过深的递归
-        if depth > 50 {
-            println!("警告: 目录层级过深 ({}), 跳过: {:?}", depth, path);
-            return Ok(());
-        }
-
-        // 添加缩进以显示目录层级
-        let indent = "  ".repeat(depth);
-        
-        let entries = match fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(e) => {
-                println!("{}无法读取目录 {:?}: {}", indent, path, e);
-                return Err(e.into());
-            }
-        };
-        
-        let mut toml_files = Vec::new();
-        let mut subdirs = Vec::new();
-        
-        // 收集所有条目
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    println!("{}跳过无法读取的条目: {}", indent, e);
-                    continue;
-                }
-            };
+            let entry = entry?;
+            let path = entry.path();
             
-            let entry_path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    println!("{}跳过无法获取元数据的条目 {:?}: {}", indent, entry_path, e);
-                    continue;
-                }
-            };
-            
-            if metadata.is_file() {
-                if entry_path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    toml_files.push(entry_path);
-                }
-            } else if metadata.is_dir() && recursive {
-                subdirs.push(entry_path);
-            }
-        }
-        
-        // 处理当前目录的TOML文件
-        if !toml_files.is_empty() {
-            println!("{}在目录 {:?} 中发现 {} 个TOML文件", indent, path, toml_files.len());
-            
-            for toml_file in toml_files {
-                println!("{}开始加载文件: {:?}", indent, toml_file);
-                match self.load_from_toml_file(&toml_file).await {
-                    Ok(_) => {
-                        println!("{}✓ 完成文件加载: {:?}", indent, toml_file);
-                    },
-                    Err(e) => {
-                        println!("{}✗ 文件加载失败: {:?} - 错误: {}", indent, toml_file, e);
-                        // 继续处理其他文件，不中断整个流程
-                    }
-                }
-            }
-        }
-        
-        // 递归处理子目录
-        if recursive && !subdirs.is_empty() {
-            println!("{}在目录 {:?} 中发现 {} 个子目录", indent, path, subdirs.len());
-            
-            for subdir in subdirs {
-                println!("{}进入子目录: {:?}", indent, subdir);
-                if let Err(e) = self.load_directory_internal(&subdir, recursive, depth + 1).await {
-                    println!("{}✗ 处理子目录失败: {:?} - 错误: {}", indent, subdir, e);
-                    // 继续处理其他子目录，不中断整个流程
-                }
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                println!("开始加载文件: {:?}", path);
+                self.load_from_toml_file(&path).await?;
+                println!("完成文件加载: {:?}", path);
             }
         }
         
@@ -538,114 +461,6 @@ impl Neo4jService {
             .replace(")", "_")
             .replace("-", "_")
             .replace("的", "_")
-    }
-
-    // 扫描目录结构，返回将要处理的TOML文件列表（不实际加载）
-    pub async fn scan_directory<P: AsRef<Path>>(&self, dir_path: P, recursive: bool) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-        let mut toml_files = Vec::new();
-        self.scan_directory_internal(dir_path, recursive, 0, &mut toml_files).await?;
-        Ok(toml_files)
-    }
-
-    // 内部扫描实现
-    async fn scan_directory_internal<P: AsRef<Path>>(&self, dir_path: P, recursive: bool, depth: usize, toml_files: &mut Vec<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
-        let path = dir_path.as_ref();
-        
-        // 防止过深的递归
-        if depth > 50 {
-            return Ok(());
-        }
-
-        let entries = match fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(e) => return Err(e.into()),
-        };
-        
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            
-            let entry_path = entry.path();
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            
-            if metadata.is_file() {
-                if entry_path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                    toml_files.push(entry_path);
-                }
-            } else if metadata.is_dir() && recursive {
-                self.scan_directory_internal(&entry_path, recursive, depth + 1, toml_files).await?;
-            }
-        }
-        
-        Ok(())
-    }
-
-    // 获取目录统计信息
-    pub async fn get_directory_stats<P: AsRef<Path>>(&self, dir_path: P, recursive: bool) -> Result<DirectoryStats, Box<dyn std::error::Error>> {
-        let toml_files = self.scan_directory(dir_path.as_ref(), recursive).await?;
-        
-        let mut stats = DirectoryStats {
-            total_toml_files: toml_files.len(),
-            directories_scanned: 0,
-            deepest_level: 0,
-            file_paths: toml_files.clone(),
-        };
-        
-        // 计算目录统计
-        let mut directories = std::collections::HashSet::new();
-        let base_path = dir_path.as_ref();
-        
-        for file_path in &toml_files {
-            if let Some(parent) = file_path.parent() {
-                directories.insert(parent.to_path_buf());
-                
-                // 计算相对于基础路径的深度
-                if let Ok(relative) = parent.strip_prefix(base_path) {
-                    let depth = relative.components().count();
-                    stats.deepest_level = stats.deepest_level.max(depth);
-                }
-            }
-        }
-        
-        stats.directories_scanned = directories.len();
-        
-        Ok(stats)
-    }
-}
-
-// 目录扫描统计信息
-#[derive(Debug, Clone)]
-pub struct DirectoryStats {
-    pub total_toml_files: usize,
-    pub directories_scanned: usize,
-    pub deepest_level: usize,
-    pub file_paths: Vec<std::path::PathBuf>,
-}
-
-impl DirectoryStats {
-    pub fn print_summary(&self) {
-        println!("=== 目录扫描统计 ===");
-        println!("TOML文件总数: {}", self.total_toml_files);
-        println!("扫描目录数: {}", self.directories_scanned);
-        println!("最大层级深度: {}", self.deepest_level);
-        
-        if self.total_toml_files > 0 {
-            println!("\n发现的文件:");
-            for (i, path) in self.file_paths.iter().enumerate() {
-                if i < 10 {  // 只显示前10个文件
-                    println!("  {}: {:?}", i + 1, path);
-                } else if i == 10 {
-                    println!("  ... 还有 {} 个文件", self.total_toml_files - 10);
-                    break;
-                }
-            }
-        }
-        println!("===================");
     }
 }
     
