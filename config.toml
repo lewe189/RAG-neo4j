@@ -15,27 +15,27 @@ clear_db = false                          # 是否在导入前清空数据库
 [Run]
 # 程序运行配置
 count = 1                                 # 程序运行次数（重复执行次数）
-Threads = 8                               # 并行处理的最大线程数
+Threads = 8                               # 并行处理的最大文件数
 
 [After_Run]
 # 运行后处理配置
-cypher = []                               # 执行完毕后执行的cypher语句
-del_target=true                           # 是否删除标识符
+cypher_file = ""   # 执行完毕后执行的cypher脚本文件路径（可选）
 output_status = true                      # 是否输出最终状态（ok/err）
 
 [Correction]
+# 目前无效
 # 数据修正配置
-case = []                                 # 对于neo4j不欢迎的字符进行替换或删除,或者直接删除该属性
+case = []                                 # 对于neo4j不欢迎的字符进行替换
 sanitize_node_labels = true               # 是否清理节点标签中的特殊字符
 sanitize_property_keys = true             # 是否清理属性键中的特殊字符
 sanitize_relation_types = true            # 是否清理关系类型中的特殊字符
 
 [Ignore]
+# 目前无效
 # 数据过滤配置：指定要忽略的节点、关系和属性
 types = []                                # 要忽略的节点/关系类型
 propertys = []                            # 要忽略的属性名称
 
-# 扩展的忽略配置
 ignored_node_types = []                   # 要忽略的节点类型
 ignored_relation_types = []               # 要忽略的关系类型
 ignored_node_properties = [               # 要忽略的节点属性
@@ -54,6 +54,7 @@ skip_empty_values = true                  # 跳过空值属性
 filtered_values = ["", "NULL", "null", "N/A", "未知"]  # 要过滤的特定属性值
 
 [APOC]
+# 目前无效
 # APOC (Awesome Procedures On Cypher) 插件配置
 enabled = true                            # Neo4j 是否安装并启用了 APOC 插件
 

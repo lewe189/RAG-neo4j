@@ -7,6 +7,7 @@ name = "Toml2Neo4j"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures",
  "neo4rs",
  "serde",
  "serde_json",

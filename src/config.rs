@@ -52,8 +52,7 @@ pub struct RunConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AfterRunConfig {
-    pub cypher: Option<Vec<String>>,
-    pub del_target: Option<bool>,
+    pub cypher_file: Option<String>,
     pub output_status: Option<bool>,
 }
 
@@ -96,10 +95,6 @@ impl Config {
         Ok(config)
     }
     
-    /// 获取默认配置文件路径
-    pub fn default_config_path() -> String {
-        "config.toml".to_string()
-    }
     
     /// 验证配置的必要字段
     pub fn validate(&self) -> Result<(), String> {

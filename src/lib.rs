@@ -1,6 +1,7 @@
 use neo4rs::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use futures::stream::{self, StreamExt};
 
 // 导入新的代数数据类型
 pub mod adt;
@@ -69,18 +70,242 @@ impl Neo4jService {
         Ok(())
     }
 
-    // 加载文件夹中的所有文件
-    pub async fn load_directory<P: AsRef<Path>>(&self, dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
+    //支持分块处理的文件加载方法
+    pub async fn load_from_toml_file_chunked<P: AsRef<Path>>(&self, file_path: P, chunk_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+        let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
+        
+        println!("文件 {:?} 包含 {} 个节点, {} 个关系", 
+                 file_path.as_ref(), 
+                 dynamic_data.nodes.len(), 
+                 dynamic_data.relations.len());
+        
+        // 如果数据量较小，直接处理
+        if dynamic_data.nodes.len() + dynamic_data.relations.len() < chunk_size {
+            return self.create_nodes_from_dynamic_data(&dynamic_data).await;
+        }
+        
+        // 大文件分块并发处理
+        self.create_nodes_from_dynamic_data_chunked(&dynamic_data, chunk_size).await?;
+        
+        Ok(())
+    }
+
+    // 验证TOML文件格式是否正确
+    pub fn verify_toml_file<P: AsRef<Path>>(file_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let path = file_path.as_ref();
+        println!("验证TOML文件: {:?}", path);
+        
+        // 尝试读取并解析TOML文件
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("无法读取文件 {:?}: {}", path, e))?;
+        
+        // 验证TOML语法是否正确
+        let _toml_value: toml::Value = toml::from_str(&content)
+            .map_err(|e| format!("TOML语法错误 {:?}: {}", path, e))?;
+        
+        // 尝试解析为我们的动态数据结构
+        match DynamicTomlData::from_file(path.to_str().unwrap()) {
+            Ok(_) => {
+                println!("TOML文件格式验证通过: {:?}", path);
+                Ok(())
+            },
+            Err(e) => {
+                Err(format!("TOML文件结构验证失败 {:?}: {}", path, e).into())
+            }
+        }
+    }
+
+    // 验证目录中所有TOML文件的格式
+    pub fn verify_toml_directory<P: AsRef<Path>>(dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let mut toml_files = Vec::new();
+        Self::collect_toml_files_for_verification(dir_path.as_ref(), &mut toml_files)?;
+        
+        if toml_files.is_empty() {
+            println!("未找到任何TOML文件需要验证");
+            return Ok(());
+        }
+        
+        println!("开始验证 {} 个TOML文件...", toml_files.len());
+        
+        let mut failed_files = Vec::new();
+        
+        for file_path in &toml_files {
+            match Self::verify_toml_file(file_path) {
+                Ok(_) => {
+                    // 验证成功，继续
+                },
+                Err(e) => {
+                    println!("验证失败: {}", e);
+                    failed_files.push(file_path.clone());
+                }
+            }
+        }
+        
+        if failed_files.is_empty() {
+            println!("所有 {} 个TOML文件验证通过", toml_files.len());
+            Ok(())
+        } else {
+            Err(format!("有 {} 个TOML文件验证失败: {:?}", failed_files.len(), failed_files).into())
+        }
+    }
+
+    // 收集TOML文件用于验证（同步版本）
+    fn collect_toml_files_for_verification(dir_path: &Path, toml_files: &mut Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         let entries = fs::read_dir(dir_path)?;
         
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
             
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                println!("开始加载文件: {:?}", path);
-                self.load_from_toml_file(&path).await?;
-                println!("完成文件加载: {:?}", path);
+            if path.is_dir() {
+                // 递归处理子目录
+                Self::collect_toml_files_for_verification(&path, toml_files)?;
+            } else if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                toml_files.push(path);
+            }
+        }
+        
+        Ok(())
+    }
+
+    // 执行After_Run配置
+    pub async fn execute_after_run(&self, after_run: &crate::config::AfterRunConfig) -> Result<(), Box<dyn std::error::Error>> {
+        println!("=== 开始执行After_Run配置 ===");
+        
+        // 执行Cypher脚本文件（如果指定）
+        if let Some(cypher_file) = &after_run.cypher_file {
+            if !cypher_file.trim().is_empty() {
+                if Path::new(cypher_file).exists() {
+                    println!("执行After_Run Cypher脚本: {}", cypher_file);
+                    self.execute_cypher_file(cypher_file).await?;
+                    println!("After_Run Cypher脚本执行完成");
+                } else {
+                    println!("指定的Cypher脚本文件不存在: {}", cypher_file);
+                }
+            }
+        }
+        
+        // 输出最终状态（如果启用）
+        if after_run.output_status.unwrap_or(false) {
+            println!("=== 最终状态: OK ===");
+        }
+        
+        println!("=== After_Run执行完成 ===");
+        Ok(())
+    }
+
+    // 递归加载文件夹中的所有TOML文件（支持并发处理）
+    pub async fn load_directory_with_config<P: AsRef<Path>>(&self, dir_path: P, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.load_directory_recursive_concurrent(dir_path.as_ref(), max_concurrent).await
+    }
+
+    // 递归加载文件夹中的所有TOML文件（默认单线程，保持向后兼容）
+    pub async fn load_directory<P: AsRef<Path>>(&self, dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        self.load_directory_recursive_concurrent(dir_path.as_ref(), 1).await
+    }
+
+    // 递归扫描目录并并发加载所有TOML文件
+    async fn load_directory_recursive_concurrent(&self, dir_path: &Path, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
+        // 收集所有TOML文件路径
+        let mut toml_files = Vec::new();
+        let mut subdirs = Vec::new();
+        
+        self.collect_files_recursive(dir_path, &mut toml_files, &mut subdirs)?;
+        
+        println!("发现 {} 个TOML文件，准备并发处理 (最大并发数: {})", toml_files.len(), max_concurrent);
+        
+        if toml_files.is_empty() {
+            println!("没有找到任何TOML文件");
+            return Ok(());
+        }
+        
+        // 预估文件大小，按大小排序（大文件优先处理）
+        let mut file_info: Vec<_> = toml_files.iter()
+            .map(|path| {
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                (path.clone(), size)
+            })
+            .collect();
+        
+        // 大文件优先排序
+        file_info.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        println!("文件大小分布:");
+        for (path, size) in &file_info {
+            println!("  {:?}: {} bytes", path.file_name().unwrap_or_default(), size);
+        }
+        
+        // 使用流式处理控制并发，避免生命周期问题
+        
+        let results = stream::iter(file_info.into_iter())
+            .map(|(file_path, size)| async move {
+                println!("开始加载文件: {:?}", file_path.file_name().unwrap_or_default());
+                
+                // 根据文件大小决定处理策略
+                let chunk_size = if size > 1_000_000 { // 1MB以上的文件
+                    1000 // 使用较小的块大小
+                } else if size > 100_000 { // 100KB以上的文件
+                    5000 // 使用中等的块大小
+                } else {
+                    10000 // 小文件使用大块大小
+                };
+                
+                
+                let result = if size > 500_000 { // 500KB以上使用分块处理
+                    self.load_from_toml_file_chunked(&file_path, chunk_size).await
+                } else {
+                    self.load_from_toml_file(&file_path).await
+                };
+                
+
+                
+                match result {
+                    Ok(_) => {
+                        println!("完成文件加载: {:?}", file_path.file_name().unwrap_or_default());
+                        Ok(())
+                    },
+                    Err(e) => {
+                        println!("文件加载失败: {:?} - 错误: {}", file_path.file_name().unwrap_or_default(), e);
+                        Err(e)
+                    }
+                }
+            })
+            .buffer_unordered(max_concurrent) // 控制最大并发数
+            .collect::<Vec<_>>()
+            .await;
+        
+        // 收集所有错误
+        let mut errors = Vec::new();
+        for result in results {
+            if let Err(e) = result {
+                errors.push(e);
+            }
+        }
+        
+        if !errors.is_empty() {
+            println!("处理过程中发生 {} 个错误", errors.len());
+            // 返回第一个错误
+            return Err(errors.into_iter().next().unwrap());
+        }
+        
+        println!("所有TOML文件处理完成");
+        Ok(())
+    }
+    
+    // 递归收集所有TOML文件路径
+    fn collect_files_recursive(&self, dir_path: &Path, toml_files: &mut Vec<PathBuf>, subdirs: &mut Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+        let entries = fs::read_dir(dir_path)?;
+        
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                subdirs.push(path.clone());
+                // 递归处理子目录
+                self.collect_files_recursive(&path, toml_files, subdirs)?;
+            } else if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                toml_files.push(path);
             }
         }
         
@@ -95,6 +320,61 @@ impl Neo4jService {
         // 批量处理所有关系
         self.create_dynamic_relations_batch(dynamic_data).await?;
         
+        Ok(())
+    }
+
+    //分块并发处理大型数据
+    async fn create_nodes_from_dynamic_data_chunked(&self, dynamic_data: &DynamicTomlData, chunk_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+        
+        // 处理节点 - 分块并发
+        if !dynamic_data.nodes.is_empty() {
+            let node_chunks: Vec<_> = dynamic_data.nodes.chunks(chunk_size).collect();
+            
+            let results = stream::iter(node_chunks.into_iter().enumerate())
+                .map(|(i, chunk)| {
+                    let chunk_data = DynamicTomlData {
+                        nodes: chunk.to_vec(),
+                        relations: Vec::new(),
+                    };
+                    async move {
+                        println!("处理节点块 {}", i + 1);
+                        self.create_dynamic_nodes_batch(&chunk_data).await
+                    }
+                })
+                .buffer_unordered(4) // 同时处理4个块
+                .collect::<Vec<_>>()
+                .await;
+                
+            for result in results {
+                result?;
+            }
+        }
+        
+        // 处理关系 - 分块并发
+        if !dynamic_data.relations.is_empty() {
+            let relation_chunks: Vec<_> = dynamic_data.relations.chunks(chunk_size).collect();
+
+            let results = stream::iter(relation_chunks.into_iter().enumerate())
+                .map(|(i, chunk)| {
+                    let chunk_data = DynamicTomlData {
+                        nodes: Vec::new(),
+                        relations: chunk.to_vec(),
+                    };
+                    async move {
+                        println!("处理关系块 {}", i + 1);
+                        self.create_dynamic_relations_batch(&chunk_data).await
+                    }
+                })
+                .buffer_unordered(4) // 同时处理4个块
+                .collect::<Vec<_>>()
+                .await;
+                
+            for result in results {
+                result?;
+            }
+        }
+        
+        println!("分块处理完成");
         Ok(())
     }
 
