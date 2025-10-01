@@ -129,9 +129,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or(1) as usize; // 默认单线程
 
             if Path::new(&input_path).is_dir() {
-                // 如果是目录，使用配置的线程数并发递归加载目录中的所有TOML文件
+                // 如果是目录，使用完整配置进行节点优先处理
                 println!("开始递归扫描目录: {} (并发数: {})", input_path, max_concurrent);
-                service.load_directory_with_config(&input_path, max_concurrent).await?;
+                service.load_directory_with_config(&input_path, &config).await?;
                 println!("已从目录 {} 递归导入所有TOML文件", input_path);
             } else {
                 // 如果是单个文件，加载单个TOML文件

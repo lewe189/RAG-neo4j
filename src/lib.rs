@@ -71,7 +71,7 @@ impl Neo4jService {
     }
 
     //支持分块处理的文件加载方法
-    pub async fn load_from_toml_file_chunked<P: AsRef<Path>>(&self, file_path: P, chunk_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn load_from_toml_file_chunked<P: AsRef<Path>>(&self, file_path: P, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
         let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
         
         println!("文件 {:?} 包含 {} 个节点, {} 个关系", 
@@ -85,7 +85,81 @@ impl Neo4jService {
         }
         
         // 大文件分块并发处理
-        self.create_nodes_from_dynamic_data_chunked(&dynamic_data, chunk_size).await?;
+        self.create_nodes_from_dynamic_data_chunked(&dynamic_data, chunk_size, chunk_concurrency).await?;
+        
+        Ok(())
+    }
+
+    // 只加载文件中的节点（小文件）
+    async fn load_nodes_only_from_toml_file<P: AsRef<Path>>(&self, file_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
+        
+        println!("处理节点文件 {:?}: {} 个节点", 
+                 file_path.as_ref().file_name().unwrap_or_default(), 
+                 dynamic_data.nodes.len());
+        
+        // 只创建节点
+        if !dynamic_data.nodes.is_empty() {
+            let node_only_data = DynamicTomlData {
+                nodes: dynamic_data.nodes,
+                relations: Vec::new(),
+            };
+            self.create_dynamic_nodes_batch(&node_only_data).await?;
+        }
+        
+        Ok(())
+    }
+
+    // 只加载文件中的关系（小文件）
+    async fn load_relations_only_from_toml_file<P: AsRef<Path>>(&self, file_path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
+        
+        println!("处理关系文件 {:?}: {} 个关系", 
+                 file_path.as_ref().file_name().unwrap_or_default(), 
+                 dynamic_data.relations.len());
+        
+        // 只创建关系
+        if !dynamic_data.relations.is_empty() {
+            let relation_only_data = DynamicTomlData {
+                nodes: Vec::new(),
+                relations: dynamic_data.relations,
+            };
+            self.create_dynamic_relations_batch(&relation_only_data).await?;
+        }
+        
+        Ok(())
+    }
+
+    // 只加载文件中的节点（大文件分块处理）
+    async fn load_nodes_only_from_toml_file_chunked<P: AsRef<Path>>(&self, file_path: P, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
+        let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
+        
+        println!("分块处理节点文件 {:?}: {} 个节点, 块大小: {}", 
+                 file_path.as_ref().file_name().unwrap_or_default(), 
+                 dynamic_data.nodes.len(),
+                 chunk_size);
+        
+        // 只处理节点
+        if !dynamic_data.nodes.is_empty() {
+            self.create_nodes_only_chunked(&dynamic_data, chunk_size, chunk_concurrency).await?;
+        }
+        
+        Ok(())
+    }
+
+    // 只加载文件中的关系（大文件分块处理）
+    async fn load_relations_only_from_toml_file_chunked<P: AsRef<Path>>(&self, file_path: P, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
+        let dynamic_data = DynamicTomlData::from_file(file_path.as_ref().to_str().unwrap())?;
+        
+        println!("分块处理关系文件 {:?}: {} 个关系, 块大小: {}", 
+                 file_path.as_ref().file_name().unwrap_or_default(), 
+                 dynamic_data.relations.len(),
+                 chunk_size);
+        
+        // 只处理关系
+        if !dynamic_data.relations.is_empty() {
+            self.create_relations_only_chunked(&dynamic_data, chunk_size, chunk_concurrency).await?;
+        }
         
         Ok(())
     }
@@ -194,25 +268,39 @@ impl Neo4jService {
         Ok(())
     }
 
-    // 递归加载文件夹中的所有TOML文件（支持并发处理）
-    pub async fn load_directory_with_config<P: AsRef<Path>>(&self, dir_path: P, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.load_directory_recursive_concurrent(dir_path.as_ref(), max_concurrent).await
-    }
-
     // 递归加载文件夹中的所有TOML文件（默认单线程，保持向后兼容）
     pub async fn load_directory<P: AsRef<Path>>(&self, dir_path: P) -> Result<(), Box<dyn std::error::Error>> {
         self.load_directory_recursive_concurrent(dir_path.as_ref(), 1).await
     }
 
-    // 递归扫描目录并并发加载所有TOML文件
-    async fn load_directory_recursive_concurrent(&self, dir_path: &Path, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
+    // 递归加载文件夹中的所有TOML文件（支持并发处理）
+    pub async fn load_directory_with_threads<P: AsRef<Path>>(&self, dir_path: P, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.load_directory_recursive_concurrent(dir_path.as_ref(), max_concurrent).await
+    }
+
+    // 根据配置加载目录中的TOML文件，支持节点优先处理和完整配置
+    pub async fn load_directory_with_config<P: AsRef<Path>>(&self, dir_path: P, config: &crate::config::Config) -> Result<(), Box<dyn std::error::Error>> {
+        let max_concurrent = config.run.as_ref()
+            .and_then(|r| r.threads)
+            .unwrap_or(1) as usize;
+            
+        let chunk_concurrency = config.run.as_ref()
+            .and_then(|r| r.chunk_concurrency)
+            .unwrap_or(4) as usize;
+            
+        self.load_directory_recursive_concurrent_with_config(dir_path.as_ref(), max_concurrent, chunk_concurrency).await
+    }
+
+    // 递归扫描目录并并发加载所有TOML文件，节点优先处理，支持配置
+    async fn load_directory_recursive_concurrent_with_config(&self, dir_path: &Path, max_concurrent: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
         // 收集所有TOML文件路径
         let mut toml_files = Vec::new();
         let mut subdirs = Vec::new();
         
         self.collect_files_recursive(dir_path, &mut toml_files, &mut subdirs)?;
         
-        println!("发现 {} 个TOML文件，准备并发处理 (最大并发数: {})", toml_files.len(), max_concurrent);
+        println!("发现 {} 个TOML文件，准备分阶段处理 (文件并发数: {}, 分块并发数: {})", 
+                 toml_files.len(), max_concurrent, chunk_concurrency);
         
         if toml_files.is_empty() {
             println!("没有找到任何TOML文件");
@@ -235,11 +323,150 @@ impl Neo4jService {
             println!("  {:?}: {} bytes", path.file_name().unwrap_or_default(), size);
         }
         
-        // 使用流式处理控制并发，避免生命周期问题
+        // 第一阶段：只处理节点
+        println!("=== 第一阶段：处理所有文件的节点 ===");
+        let results = stream::iter(file_info.iter().cloned())
+            .map(|(file_path, size)| {
+                let chunk_concurrency = chunk_concurrency;
+                async move {
+                    println!("处理节点 - 文件: {:?}", file_path.file_name().unwrap_or_default());
+                    
+                    // 根据文件大小决定处理策略
+                    let chunk_size = if size > 1_000_000 { // 1MB以上的文件
+                        1000 // 使用较小的块大小
+                    } else if size > 100_000 { // 100KB以上的文件
+                        5000 // 使用中等的块大小
+                    } else {
+                        10000 // 小文件使用大块大小
+                    };
+                    
+                    let result = if size > 500_000 { // 500KB以上使用分块处理
+                        self.load_nodes_only_from_toml_file_chunked(&file_path, chunk_size, chunk_concurrency).await
+                    } else {
+                        self.load_nodes_only_from_toml_file(&file_path).await
+                    };
+                    
+                    match result {
+                        Ok(_) => {
+                            println!("完成节点处理: {:?}", file_path.file_name().unwrap_or_default());
+                            Ok(())
+                        }
+                        Err(e) => {
+                            println!("处理节点失败 {:?}: {}", file_path.file_name().unwrap_or_default(), e);
+                            Err(e)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(max_concurrent) // 控制最大并发数
+            .collect::<Vec<_>>()
+            .await;
+            
+        // 检查节点处理结果
+        let mut errors = Vec::new();
+        for result in results {
+            if let Err(e) = result {
+                errors.push(e);
+            }
+        }
         
+        if !errors.is_empty() {
+            println!("节点处理过程中发生 {} 个错误", errors.len());
+            return Err(errors.into_iter().next().unwrap());
+        }
+        
+        println!("=== 第二阶段：处理所有文件的关系 ===");
+        // 第二阶段：处理关系
         let results = stream::iter(file_info.into_iter())
+            .map(|(file_path, size)| {
+                let chunk_concurrency = chunk_concurrency;
+                async move {
+                    println!("处理关系 - 文件: {:?}", file_path.file_name().unwrap_or_default());
+                    
+                    // 根据文件大小决定处理策略
+                    let chunk_size = if size > 1_000_000 { // 1MB以上的文件
+                        1000 // 使用较小的块大小
+                    } else if size > 100_000 { // 100KB以上的文件
+                        5000 // 使用中等的块大小
+                    } else {
+                        10000 // 小文件使用大块大小
+                    };
+                    
+                    let result = if size > 500_000 { // 500KB以上使用分块处理
+                        self.load_relations_only_from_toml_file_chunked(&file_path, chunk_size, chunk_concurrency).await
+                    } else {
+                        self.load_relations_only_from_toml_file(&file_path).await
+                    };
+                    
+                    match result {
+                        Ok(_) => {
+                            println!("完成关系处理: {:?}", file_path.file_name().unwrap_or_default());
+                            Ok(())
+                        },
+                        Err(e) => {
+                            println!("处理关系失败: {:?} - 错误: {}", file_path.file_name().unwrap_or_default(), e);
+                            Err(e)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(max_concurrent) // 控制最大并发数
+            .collect::<Vec<_>>()
+            .await;
+            
+        // 检查关系处理结果
+        let mut errors = Vec::new();
+        for result in results {
+            if let Err(e) = result {
+                errors.push(e);
+            }
+        }
+        
+        if !errors.is_empty() {
+            println!("关系处理过程中发生 {} 个错误", errors.len());
+            return Err(errors.into_iter().next().unwrap());
+        }
+        
+        println!("所有TOML文件处理完成");
+        Ok(())
+    }
+
+    // 递归扫描目录并并发加载所有TOML文件，节点优先处理
+    async fn load_directory_recursive_concurrent(&self, dir_path: &Path, max_concurrent: usize) -> Result<(), Box<dyn std::error::Error>> {
+        // 收集所有TOML文件路径
+        let mut toml_files = Vec::new();
+        let mut subdirs = Vec::new();
+        
+        self.collect_files_recursive(dir_path, &mut toml_files, &mut subdirs)?;
+        
+        println!("发现 {} 个TOML文件，准备分阶段处理 (最大并发数: {})", toml_files.len(), max_concurrent);
+        
+        if toml_files.is_empty() {
+            println!("没有找到任何TOML文件");
+            return Ok(());
+        }
+        
+        // 预估文件大小，按大小排序（大文件优先处理）
+        let mut file_info: Vec<_> = toml_files.iter()
+            .map(|path| {
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                (path.clone(), size)
+            })
+            .collect();
+        
+        // 大文件优先排序
+        file_info.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        println!("文件大小分布:");
+        for (path, size) in &file_info {
+            println!("  {:?}: {} bytes", path.file_name().unwrap_or_default(), size);
+        }
+        
+        // 第一阶段：只处理节点
+        println!("=== 第一阶段：处理所有文件的节点 ===");
+        let results = stream::iter(file_info.iter().cloned())
             .map(|(file_path, size)| async move {
-                println!("开始加载文件: {:?}", file_path.file_name().unwrap_or_default());
+                println!("处理节点 - 文件: {:?}", file_path.file_name().unwrap_or_default());
                 
                 // 根据文件大小决定处理策略
                 let chunk_size = if size > 1_000_000 { // 1MB以上的文件
@@ -250,22 +477,19 @@ impl Neo4jService {
                     10000 // 小文件使用大块大小
                 };
                 
-                
                 let result = if size > 500_000 { // 500KB以上使用分块处理
-                    self.load_from_toml_file_chunked(&file_path, chunk_size).await
+                    self.load_nodes_only_from_toml_file_chunked(&file_path, chunk_size, 4).await
                 } else {
-                    self.load_from_toml_file(&file_path).await
+                    self.load_nodes_only_from_toml_file(&file_path).await
                 };
-                
-
                 
                 match result {
                     Ok(_) => {
-                        println!("完成文件加载: {:?}", file_path.file_name().unwrap_or_default());
+                        println!("完成节点处理: {:?}", file_path.file_name().unwrap_or_default());
                         Ok(())
-                    },
+                    }
                     Err(e) => {
-                        println!("文件加载失败: {:?} - 错误: {}", file_path.file_name().unwrap_or_default(), e);
+                        println!("处理节点失败 {:?}: {}", file_path.file_name().unwrap_or_default(), e);
                         Err(e)
                     }
                 }
@@ -273,8 +497,8 @@ impl Neo4jService {
             .buffer_unordered(max_concurrent) // 控制最大并发数
             .collect::<Vec<_>>()
             .await;
-        
-        // 收集所有错误
+            
+        // 检查节点处理结果
         let mut errors = Vec::new();
         for result in results {
             if let Err(e) = result {
@@ -283,8 +507,56 @@ impl Neo4jService {
         }
         
         if !errors.is_empty() {
-            println!("处理过程中发生 {} 个错误", errors.len());
-            // 返回第一个错误
+            println!("节点处理过程中发生 {} 个错误", errors.len());
+            return Err(errors.into_iter().next().unwrap());
+        }
+        
+        println!("=== 第二阶段：处理所有文件的关系 ===");
+        // 第二阶段：处理关系
+        let results = stream::iter(file_info.into_iter())
+            .map(|(file_path, size)| async move {
+                println!("处理关系 - 文件: {:?}", file_path.file_name().unwrap_or_default());
+                
+                // 根据文件大小决定处理策略
+                let chunk_size = if size > 1_000_000 { // 1MB以上的文件
+                    1000 // 使用较小的块大小
+                } else if size > 100_000 { // 100KB以上的文件
+                    5000 // 使用中等的块大小
+                } else {
+                    10000 // 小文件使用大块大小
+                };
+                
+                let result = if size > 500_000 { // 500KB以上使用分块处理
+                    self.load_relations_only_from_toml_file_chunked(&file_path, chunk_size, 4).await
+                } else {
+                    self.load_relations_only_from_toml_file(&file_path).await
+                };
+                
+                match result {
+                    Ok(_) => {
+                        println!("完成关系处理: {:?}", file_path.file_name().unwrap_or_default());
+                        Ok(())
+                    },
+                    Err(e) => {
+                        println!("处理关系失败: {:?} - 错误: {}", file_path.file_name().unwrap_or_default(), e);
+                        Err(e)
+                    }
+                }
+            })
+            .buffer_unordered(max_concurrent) // 控制最大并发数
+            .collect::<Vec<_>>()
+            .await;
+            
+        // 检查关系处理结果
+        let mut errors = Vec::new();
+        for result in results {
+            if let Err(e) = result {
+                errors.push(e);
+            }
+        }
+        
+        if !errors.is_empty() {
+            println!("关系处理过程中发生 {} 个错误", errors.len());
             return Err(errors.into_iter().next().unwrap());
         }
         
@@ -324,7 +596,7 @@ impl Neo4jService {
     }
 
     //分块并发处理大型数据
-    async fn create_nodes_from_dynamic_data_chunked(&self, dynamic_data: &DynamicTomlData, chunk_size: usize) -> Result<(), Box<dyn std::error::Error>> {
+    async fn create_nodes_from_dynamic_data_chunked(&self, dynamic_data: &DynamicTomlData, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
         
         // 处理节点 - 分块并发
         if !dynamic_data.nodes.is_empty() {
@@ -341,7 +613,7 @@ impl Neo4jService {
                         self.create_dynamic_nodes_batch(&chunk_data).await
                     }
                 })
-                .buffer_unordered(4) // 同时处理4个块
+                .buffer_unordered(chunk_concurrency) // 使用配置的并发数
                 .collect::<Vec<_>>()
                 .await;
                 
@@ -365,7 +637,7 @@ impl Neo4jService {
                         self.create_dynamic_relations_batch(&chunk_data).await
                     }
                 })
-                .buffer_unordered(4) // 同时处理4个块
+                .buffer_unordered(chunk_concurrency) // 使用配置的并发数
                 .collect::<Vec<_>>()
                 .await;
                 
@@ -375,6 +647,64 @@ impl Neo4jService {
         }
         
         println!("分块处理完成");
+        Ok(())
+    }
+
+    // 只处理节点的分块方法
+    async fn create_nodes_only_chunked(&self, dynamic_data: &DynamicTomlData, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
+        if !dynamic_data.nodes.is_empty() {
+            let node_chunks: Vec<_> = dynamic_data.nodes.chunks(chunk_size).collect();
+            
+            let results = stream::iter(node_chunks.into_iter().enumerate())
+                .map(|(i, chunk)| {
+                    let chunk_data = DynamicTomlData {
+                        nodes: chunk.to_vec(),
+                        relations: Vec::new(),
+                    };
+                    async move {
+                        println!("处理节点块 {}", i + 1);
+                        self.create_dynamic_nodes_batch(&chunk_data).await
+                    }
+                })
+                .buffer_unordered(chunk_concurrency) // 使用配置的并发数
+                .collect::<Vec<_>>()
+                .await;
+                
+            for result in results {
+                result?;
+            }
+        }
+        
+        println!("节点分块处理完成");
+        Ok(())
+    }
+
+    // 只处理关系的分块方法
+    async fn create_relations_only_chunked(&self, dynamic_data: &DynamicTomlData, chunk_size: usize, chunk_concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
+        if !dynamic_data.relations.is_empty() {
+            let relation_chunks: Vec<_> = dynamic_data.relations.chunks(chunk_size).collect();
+
+            let results = stream::iter(relation_chunks.into_iter().enumerate())
+                .map(|(i, chunk)| {
+                    let chunk_data = DynamicTomlData {
+                        nodes: Vec::new(),
+                        relations: chunk.to_vec(),
+                    };
+                    async move {
+                        println!("处理关系块 {}", i + 1);
+                        self.create_dynamic_relations_batch(&chunk_data).await
+                    }
+                })
+                .buffer_unordered(chunk_concurrency) // 使用配置的并发数
+                .collect::<Vec<_>>()
+                .await;
+                
+            for result in results {
+                result?;
+            }
+        }
+        
+        println!("关系分块处理完成");
         Ok(())
     }
 

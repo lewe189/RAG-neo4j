@@ -16,6 +16,7 @@ clear_db = false                          # 是否在导入前清空数据库
 # 程序运行配置
 count = 1                                 # 程序运行次数（重复执行次数）
 Threads = 8                               # 并行处理的最大文件数
+ChunkConcurrency = 4                      # 大文件分块处理时的并发数
 
 [After_Run]
 # 运行后处理配置
