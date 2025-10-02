@@ -61,6 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Import { input } => {
             println!("=== 程序启动 ===");
             
+            // 重置统计信息
+            service.reset_processing_stats();
+            
             // 确定输入路径：优先使用命令行参数，否则使用配置文件中的默认路径
             let input_path = match input {
                 Some(path) => path.clone(),

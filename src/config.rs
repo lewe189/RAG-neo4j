@@ -54,6 +54,7 @@ pub struct RunConfig {
 pub struct AfterRunConfig {
     pub cypher_file: Option<String>,
     pub output_status: Option<bool>,
+    pub output_summary: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

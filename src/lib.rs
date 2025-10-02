@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use futures::stream::{self, StreamExt};
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 // 导入新的代数数据类型
 pub mod adt;
 pub use adt::{DynamicTomlData, NodeEntity, RelationEntity, PropertyValue};
@@ -11,15 +14,56 @@ pub use adt::{DynamicTomlData, NodeEntity, RelationEntity, PropertyValue};
 pub mod config;
 pub use config::{Config, Neo4jConfig};
 
+// 统计信息结构
+#[derive(Debug, Clone)]
+pub struct ProcessingStats {
+    pub nodes_processed: Arc<AtomicU64>,
+    pub relations_processed: Arc<AtomicU64>,
+}
+
+impl ProcessingStats {
+    pub fn new() -> Self {
+        Self {
+            nodes_processed: Arc::new(AtomicU64::new(0)),
+            relations_processed: Arc::new(AtomicU64::new(0)),
+        }
+    }
+    
+    pub fn add_nodes(&self, count: u64) {
+        self.nodes_processed.fetch_add(count, Ordering::Relaxed);
+    }
+    
+    pub fn add_relations(&self, count: u64) {
+        self.relations_processed.fetch_add(count, Ordering::Relaxed);
+    }
+    
+    pub fn get_nodes(&self) -> u64 {
+        self.nodes_processed.load(Ordering::Relaxed)
+    }
+    
+    pub fn get_relations(&self) -> u64 {
+        self.relations_processed.load(Ordering::Relaxed)
+    }
+    
+    pub fn reset(&self) {
+        self.nodes_processed.store(0, Ordering::Relaxed);
+        self.relations_processed.store(0, Ordering::Relaxed);
+    }
+}
+
 // 定义一个结构化的Neo4j服务 OOP
 pub struct Neo4jService {
     graph: Graph,
+    stats: ProcessingStats,
 }
 
 impl Neo4jService {
     pub async fn new(uri: &str, user: &str, password: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let graph = Graph::new(uri, user, password).await?;
-        Ok(Self { graph })
+        Ok(Self { 
+            graph,
+            stats: ProcessingStats::new(),
+        })
     }
 
     // 重试机制处理死锁和其他瞬态错误
@@ -72,6 +116,16 @@ impl Neo4jService {
                 }
             }
         }
+    }
+
+    // 获取处理统计信息
+    pub fn get_processing_stats(&self) -> (u64, u64) {
+        (self.stats.get_nodes(), self.stats.get_relations())
+    }
+    
+    // 重置处理统计信息
+    pub fn reset_processing_stats(&self) {
+        self.stats.reset();
     }
 
     // 清空数据库
@@ -314,6 +368,15 @@ impl Neo4jService {
         // 输出最终状态（如果启用）
         if after_run.output_status.unwrap_or(false) {
             println!("=== 最终状态: OK ===");
+        }
+        
+        // 输出统计摘要（如果启用）
+        if after_run.output_summary.unwrap_or(false) {
+            let (total_nodes, total_relations) = self.get_processing_stats();
+            println!("=== 导入摘要 ===");
+            println!("总共成功导入节点数量: {}", total_nodes);
+            println!("总共成功导入关系数量: {}", total_relations);
+            println!("==================");
         }
         
         println!("=== After_Run执行完成 ===");
@@ -836,6 +899,8 @@ impl Neo4jService {
             match self.execute_with_retry(query_builder, 3, 500).await {
                 Ok(_) => {
                     total_processed += processed_count;
+                    // 添加到统计信息
+                    self.stats.add_nodes(processed_count as u64);
                     println!("成功批量处理 {} 个 {} 节点", processed_count, node_type);
                 },
                 Err(e) => {
@@ -872,7 +937,8 @@ impl Neo4jService {
             // 使用重试机制处理主节点创建
             match self.execute_with_retry(query_builder, 3, 300).await {
                 Ok(_) => {
-                    // 静默处理
+                    // 成功创建节点，添加到统计
+                    self.stats.add_nodes(1);
                 },
                 Err(e) => {
                     println!("处理节点失败: {} (标识符: {}) - 错误: {}", node.node_type, identifier, e);
@@ -1045,6 +1111,8 @@ impl Neo4jService {
             match self.execute_with_retry(query_builder, 3, 500).await {
                 Ok(_) => {
                     total_processed += processed_count;
+                    // 添加到统计信息
+                    self.stats.add_relations(processed_count as u64);
                     println!("成功批量处理 {} 个 {} 关系", processed_count, rel_type);
                 },
                 Err(e) => {
@@ -1080,6 +1148,9 @@ impl Neo4jService {
             // 使用重试机制处理关系创建
             match self.execute_with_retry(query_builder, 3, 300).await {
                 Ok(_) => {
+                    // 成功创建关系，添加到统计
+                    self.stats.add_relations(1);
+                    
                     // 如果有额外属性，分别设置
                     for (key, value) in &relation.properties {
                         match value {
