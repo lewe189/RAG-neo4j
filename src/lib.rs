@@ -22,6 +22,58 @@ impl Neo4jService {
         Ok(Self { graph })
     }
 
+    // 重试机制处理死锁和其他瞬态错误
+    async fn execute_with_retry(
+        &self, 
+        query_builder: neo4rs::Query, 
+        max_retries: u32, 
+        base_delay_ms: u64
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut retries = 0;
+        
+        loop {
+            match self.graph.run(query_builder.clone()).await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    
+                    // 检查是否是死锁错误
+                    let is_deadlock = error_msg.contains("DeadlockDetected") 
+                        || error_msg.contains("can't acquire ExclusiveLock")
+                        || error_msg.contains("ForsetiClient");
+                    
+                    // 检查是否是其他瞬态错误
+                    let is_transient = error_msg.contains("TransientError") 
+                        || error_msg.contains("ConnectionUnavailable")
+                        || error_msg.contains("ServiceUnavailable");
+                    
+                    if (is_deadlock || is_transient) && retries < max_retries {
+                        retries += 1;
+                        let delay = base_delay_ms * (2_u64.pow(retries - 1)); // 指数退避
+                        
+                        if is_deadlock {
+                            println!("检测到死锁，第 {} 次重试（延迟 {}ms）: {}", 
+                                retries, delay, error_msg.chars().take(100).collect::<String>());
+                        } else {
+                            println!("检测到瞬态错误，第 {} 次重试（延迟 {}ms）: {}", 
+                                retries, delay, error_msg.chars().take(100).collect::<String>());
+                        }
+                        
+                        // 使用指数退避策略
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+                        continue;
+                    } else {
+                        // 不是可重试的错误，或者重试次数已用完
+                        if retries >= max_retries {
+                            println!("重试 {} 次后仍然失败: {}", max_retries, error_msg);
+                        }
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+    }
+
     // 清空数据库
     pub async fn clear_database(&self) -> Result<(), Box<dyn std::error::Error>> {
         let query = query("MATCH (n) DETACH DELETE n");
@@ -777,16 +829,17 @@ impl Neo4jService {
                 node_type
             );
             
-            let query_builder = query(&cypher_query).param("nodes", node_data);
+            let query_builder = query(&cypher_query).param("nodes", node_data.clone());
             let processed_count = type_nodes.len();
             
-            match self.graph.run(query_builder).await {
+            // 使用重试机制处理死锁
+            match self.execute_with_retry(query_builder, 3, 500).await {
                 Ok(_) => {
                     total_processed += processed_count;
                     println!("成功批量处理 {} 个 {} 节点", processed_count, node_type);
                 },
                 Err(e) => {
-                    println!("批量处理 {} 节点失败: {}", node_type, e);
+                    println!("批量处理 {} 节点失败（重试后仍失败）: {}", node_type, e);
                     // 单个节点类型失败时，回退到逐个处理
                     return self.create_dynamic_nodes_fallback(dynamic_data).await;
                 }
@@ -816,6 +869,17 @@ impl Neo4jService {
                 node.node_type
             )).param("identifier", identifier.as_str());
             
+            // 使用重试机制处理主节点创建
+            match self.execute_with_retry(query_builder, 3, 300).await {
+                Ok(_) => {
+                    // 静默处理
+                },
+                Err(e) => {
+                    println!("处理节点失败: {} (标识符: {}) - 错误: {}", node.node_type, identifier, e);
+                    continue;
+                }
+            }
+            
             // 添加其他属性
             for (key, value) in &node.properties {
                 if key == "标识符" {
@@ -839,17 +903,9 @@ impl Neo4jService {
                     .param("identifier", identifier.as_str())
                     .param("value", value_str.as_str());
                 
-                if let Err(e) = self.graph.run(attr_query).await {
+                // 为属性设置也添加重试机制（较少的重试次数）
+                if let Err(e) = self.execute_with_retry(attr_query, 2, 200).await {
                     println!("设置属性失败: {} - {}", key, e);
-                }
-            }
-            
-            match self.graph.run(query_builder).await {
-                Ok(_) => {
-                    // 静默处理
-                },
-                Err(e) => {
-                    println!("处理节点失败: {} (标识符: {}) - 错误: {}", node.node_type, identifier, e);
                 }
             }
         }
@@ -982,16 +1038,17 @@ impl Neo4jService {
                 )
             };
             
-            let query_builder = query(&cypher_query).param("relations", relation_data);
+            let query_builder = query(&cypher_query).param("relations", relation_data.clone());
             let processed_count = type_relations.len();
             
-            match self.graph.run(query_builder).await {
+            // 使用重试机制处理死锁
+            match self.execute_with_retry(query_builder, 3, 500).await {
                 Ok(_) => {
                     total_processed += processed_count;
                     println!("成功批量处理 {} 个 {} 关系", processed_count, rel_type);
                 },
                 Err(e) => {
-                    println!("批量处理 {} 关系失败: {}", rel_type, e);
+                    println!("批量处理 {} 关系失败（重试后仍失败）: {}", rel_type, e);
                     // 单个关系类型失败时，回退到逐个处理
                     return self.create_dynamic_relations_fallback(dynamic_data).await;
                 }
@@ -1020,7 +1077,8 @@ impl Neo4jService {
                 .param("source_id", relation.source.as_str())
                 .param("target_id", relation.target.as_str());
             
-            match self.graph.run(query_builder).await {
+            // 使用重试机制处理关系创建
+            match self.execute_with_retry(query_builder, 3, 300).await {
                 Ok(_) => {
                     // 如果有额外属性，分别设置
                     for (key, value) in &relation.properties {
@@ -1045,7 +1103,8 @@ impl Neo4jService {
                             .param("target_id", relation.target.as_str())
                             .param("value", value_str.as_str());
                         
-                        if let Err(e) = self.graph.run(attr_query_builder).await {
+                        // 为关系属性设置也添加重试机制
+                        if let Err(e) = self.execute_with_retry(attr_query_builder, 2, 200).await {
                             println!("设置关系属性失败: {} - {}", key, e);
                         }
                     }

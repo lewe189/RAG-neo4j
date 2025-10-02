@@ -46,9 +46,7 @@ pub struct BeforeRunConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RunConfig {
     pub count: Option<u32>,
-    #[serde(rename = "Threads")]
     pub threads: Option<u32>,
-    #[serde(rename = "ChunkConcurrency")]
     pub chunk_concurrency: Option<u32>,
 }
 

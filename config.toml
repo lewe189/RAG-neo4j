@@ -15,13 +15,16 @@ clear_db = false                          # 是否在导入前清空数据库
 [Run]
 # 程序运行配置
 count = 1                                 # 程序运行次数（重复执行次数）
-Threads = 8                               # 并行处理的最大文件数
-ChunkConcurrency = 4                      # 大文件分块处理时的并发数
+threads = 8                               # 并行处理的最大文件数
+chunk_concurrency = 4                      # 大文件分块处理时的并发数
+enabled_correction = false               # 是否启用数据修正功能
+enabled_ignore = false                   # 是否启用数据过滤功能
 
 [After_Run]
 # 运行后处理配置
 cypher_file = ""   # 执行完毕后执行的cypher脚本文件路径（可选）
 output_status = true                      # 是否输出最终状态（ok/err）
+output_summary = true                     # 是否输出导入摘要信息
 
 [Correction]
 # 目前无效
